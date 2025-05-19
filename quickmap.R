@@ -1,17 +1,24 @@
 # Working alpha codebase for quickmap
-# current verion 0.1
+# this version 0.2
 # Includes:
 #   importing NO2 and schools data from CSV file into a simple format table
 #   plot points on a leaflet map with selector by year (time slice)
 #   offers more than one colour and labelling scheme, currently WHO NO2 and 
 #   small value changes
 # Objectives:
-#   modify to use create and data in OpenAir format (that is wide rather than long)
-#   make into a set of standalone functions to be integrated with OAPL library
-#   improve code efficiency and fault tolerance
-#   replace redundant code with functions (e.g. use assign_color in later map
+#   done: modify to use create and data in OpenAir format (that is wide rather than long) 
+#   done: make into a set of standalone functions to be integrated with OAPL library
+#   part done: improve code efficiency and fault tolerance
+#   done: replace redundant code with functions (e.g. use assign_colour in later map
 #   layers, and add scope to keep labels in a vector)
-
+# History
+#   Friday 250516:
+#     code adjusted to work with long data, OA format.
+#     code works in this current alpha. need to add back in the
+#     schools locations on next task.
+#   Monday 250519:
+#     these steps completed. Checkpoint uploaded to GitHub.
+#     next steps to test with direct output from BL input data
 
 # Install and load required packages
 packages <- c("leaflet", "sf", "dplyr", "leaflegend")
@@ -25,7 +32,9 @@ if (any(!installed)) {
 # Load all packages
 lapply(packages, library, character.only = TRUE)
 
+# function definitions ####
 
+# import and prepares the data from csv files in wide format ####
 prepare_data <- function(file_path, required_cols = c("Easting", "Northing")) {
   # Read the CSV file
   data <- read.csv(file_path, stringsAsFactors = FALSE, 
@@ -55,218 +64,303 @@ prepare_data <- function(file_path, required_cols = c("Easting", "Northing")) {
 }
 
 
-result <- prepare_data('your_data_Merton.csv', required_cols = c("Easting", "Northing"))
-data <- result$data
-value_columns <- result$value_columns
-
-result <- prepare_data('your_schools_Merton.csv', required_cols = c("Easting", "Northing", "School", "Level"))
-schools <- result$data
-value_columns_schools <- result$value_columns
-
-# Create sf objects of the data that includes the coordinates in the required
-# coordinate system (CRS) with error handling
-tryCatch({
-    sf_data <- st_as_sf(data, coords = c("Easting", "Northing"), crs = 27700)
-    sf_data_wgs84 <- st_transform(sf_data, crs = 4326)
-    sf_data_wgs84$Longitude <- st_coordinates(sf_data_wgs84)[,1]
-    sf_data_wgs84$Latitude <- st_coordinates(sf_data_wgs84)[,2]
-}, error = function(e) {
-    stop("Error in coordinate transformation: ", e$message)
-})
-
-tryCatch({
-  sf_schools <- st_as_sf(schools, coords = c("Easting", "Northing"), crs = 27700)
-  sf_schools_wgs84 <- st_transform(sf_schools, crs = 4326)
-  sf_schools_wgs84$Longitude <- st_coordinates(sf_schools_wgs84)[,1]
-  sf_schools_wgs84$Latitude <- st_coordinates(sf_schools_wgs84)[,2]
-}, error = function(e) {
-  stop("Error in coordinate transformation: ", e$message)
-})
-
-
-# Function to assign color based on value with NA handling
-assign_color <- function(value, scale = 'who_no2') {
-  # Return white if the value is NA or not numeric
-  if (is.na(value)) return("white")
-  if (!is.numeric(value)) return("white")
+# Helper function to retrieve borough boundaries (case-insensitive)
+get_borough_sf <- function(borough, crs = 4326) {
+  # Load the wardBoundaries.Rdata, which has boundaries for London councils
+  # and their wards. You can subfilter them using their name either using a single
+  # name or a set of names. Note the original file only lists one ward for the City
+  # Correct known GLA SHP name differences (original 2018 file here: 
+  # https://data.london.gov.uk/dataset/statistical-gis-boundary-files-london)
+  # Improvement option - update to include the MSOAs and LSOAs, though this would
+  # intermix 2014 L/MSOA files with ward boundaries from 2018, which may not
+  # be aligned. Check for national source of current data?
+  load(file.path(Sys.getenv("DATA_PATH"), "ward_boundaries.Rdata"))
   
-  # Define named vectors for each scale, using thresholds as names
-  # the delta colour scheme is intended for changes between years or trends
-  delta_colors <- c("#084594", "#2171B5", "#4292C6", "#6BAED6", "#9ECAE1", "#FEE391", "#FEB24C", "#FB6A4A", "#DE2D26", "#A50F15")
-  delta_thresholds <- c(8, 6, 4, 2, 0, -2, -4, -6, -8, -Inf)
-  # the who colours are an absolute scale, based on the WHO guidelines for NO2
-  who_colors <- c("blue", "green", "yellow", "orange", "red", "darkred", "#8E388E", "purple", "#4D4D4D", "black")
-  who_thresholds <- c(10, 20, 30, 40, 50, 60, 70, 80, 90, Inf)
+  # Standardise input
+  borough_input <- tools::toTitleCase(tolower(borough))
   
-  # Use findInterval to get the correct index based on the value
-  if (scale == 'delta') {
-    index <- findInterval(value, delta_thresholds, left.open = TRUE)
-    return(delta_colors[index])
-  } else if (scale == 'who_no2') {
-    index <- findInterval(value, who_thresholds, left.open = TRUE)
-    return(who_colors[index])
-  } else {
-    stop("Invalid scale specified. Choose 'delta' or 'who'.")
-  }
-}
-
-
-
-# Create a proper color palette function using colorFactor
-pal <- colorFactor(
-  palette = c("#1E90FF", "#32CD32"),  # Colors for Primary, Secondary, Other
-  domain = unique(sf_schools_wgs84$Level)
-)
-
-icons <- makeSymbolsSize(
-   values = rep(2,length(sf_schools_wgs84$Level)),
-   shape = 'cross',
-   color = pal(sf_schools_wgs84$Level),
-   fillColor = pal(sf_schools_wgs84$Level),
-   baseSize = 10,
-   fillOpacity = 0.7
+  # Correct known GLA SHP naming differences
+  corrections <- c(
+    "The City" = "City and County of the City of London",
+    "Westminster" = "City of Westminster",
+    "Kingston" = "Kingston upon Thames",
+    "Richmond" = "Richmond upon Thames"
   )
-
-
-# The wardBoundaries.Rdata file contains boundaries for all the London councils
-# and their wards. You can subfilter them using their name either using a single
-# name or a set of names.
-# The valid names are: "Kingston upon Thames", "Croydon", "Bromley", "Hounslow",
-# "Ealing", "Havering", "Hillingdon", "Harrow", "Brent", "Barnet", "Lambeth",
-# "Southwark", "Lewisham", "Greenwich", "Bexley", "Enfield", "Waltham Forest",
-# "Redbridge", "Sutton", "Richmond upon Thames", "Merton", "Wandsworth",
-# "Hammersmith and Fulham", "Kensington and Chelsea", "City of Westminster",
-# "Camden", "Tower Hamlets", "Islington", "Hackney", "Haringey", "Newham",
-# "Barking and Dagenham", "City and County of the City of London"
-load("wardBoundaries.Rdata")
-borough <- c("Merton")
-
-# Filter borough boundaries with error checking
-if (!borough %in% wardBoundaries$DISTRICT) {
-    stop("Borough not found in wardBoundaries")
+  borough_input <- ifelse(borough_input %in% names(corrections),
+                          corrections[borough_input],
+                          borough_input)
+  
+  # Return all boroughs if "all" is specified (case-insensitive)
+  if (length(borough_input) == 1 && tolower(borough_input) == "all") {
+    return(st_transform(wardBoundaries, crs = crs))
+  }
+  
+  # Check if all boroughs are valid
+  if (!all(tolower(borough_input) %in% tolower(wardBoundaries$DISTRICT))) {
+    warning(
+      paste(
+        "One or more boroughs not found. Accepted names include:",
+        "All, Barking and Dagenham, Barnet, Bexley, Brent,",
+        "Bromley, Camden, Croydon, Ealing, Enfield,",
+        "Greenwich, Hackney, Hammersmith and Fulham, Haringey,",
+        "Harrow, Havering, Hillingdon, Hounslow, Islington,",
+        "Kensington and Chelsea, Kingston, Lambeth, Lewisham,",
+        "Merton, Newham, Redbridge, Richmond, Southwark,",
+        "Sutton, The City, Tower Hamlets, Waltham Forest,",
+        "Wandsworth, Westminster.",
+        "Note: input is case-insensitive & City of London wards are incomplete.",
+        sep = "\n"
+      )
+    )
+    return(NULL)
+  }
+  
+  # Filter and return selected boroughs
+  wardBoundaries %>%
+    filter(tolower(DISTRICT) %in% tolower(borough_input)) %>%
+    st_transform(crs = crs)
 }
-borough_sf <- wardBoundaries %>%
-    filter(DISTRICT %in% borough) %>%
-    st_transform(crs = 4326)
 
-# Create extended bounding box with error checking
-tryCatch({
-    original_bbox <- st_bbox(borough_sf)
+# helper function to convert from OS northings and eastings, 
+# optionally adding year_str (probably not needed as moved to OA long data tables)
+transform_to_wgs84 <- function(df, easting = "Easting", northing = "Northing", crs_from = 27700) {
+  tryCatch({
+    sf_obj <- sf::st_as_sf(df, coords = c(easting, northing), crs = crs_from) |>
+      sf::st_transform(crs = 4326)
+    coords <- sf::st_coordinates(sf_obj)
+    sf_obj$Longitude <- coords[, 1]
+    sf_obj$Latitude <- coords[, 2]
+    
+    if ("year" %in% names(df)) {
+      sf_obj$year_str <- format(sf_obj$year, "%Y")
+    }
+    
+    sf_obj
+  }, error = function(e) {
+    stop("Coordinate transformation failed: ", e$message)
+  })
+}
+
+# Create vignette overlay from extended bounding box ####
+create_vignette_overlay <- function(spatial_feature) {
+  tryCatch({
+    original_bbox <- st_bbox(spatial_feature)
     width <- original_bbox["xmax"] - original_bbox["xmin"]
     height <- original_bbox["ymax"] - original_bbox["ymin"]
     extended_bbox <- c(
-        original_bbox["xmin"] - 0.5 * width,
-        original_bbox["ymin"] - 0.5 * height,
-        original_bbox["xmax"] + 0.5 * width,
-        original_bbox["ymax"] + 0.5 * height
+      original_bbox["xmin"] - 0.5 * width,
+      original_bbox["ymin"] - 0.5 * height,
+      original_bbox["xmax"] + 0.5 * width,
+      original_bbox["ymax"] + 0.5 * height
     )
-    extended_bbox <- st_bbox(extended_bbox, crs = st_crs(borough_sf))
+    extended_bbox <- st_bbox(extended_bbox, crs = st_crs(spatial_feature))
     bbox_polygon <- st_as_sfc(extended_bbox)
-    inverse_polygon <- st_difference(bbox_polygon, st_union(borough_sf))
-}, error = function(e) {
+    vignette_overlay <- st_difference(bbox_polygon, st_union(spatial_feature))
+    vignette_overlay
+  }, error = function(e) {
     stop("Error in bounding box creation: ", e$message)
-})
-
-# Create map with dynamic layers
-map <- leaflet(sf_data_wgs84, options = leafletOptions(zoomSnap = 0, zoomDelta = 0.25)) %>%
-     addTiles() 
-
-# Add layers dynamically for each value column
-for(col in value_columns) {
-    if (!col %in% names(sf_data_wgs84)) {
-        warning(paste("Column", col, "not found in data, skipping"))
-        next
-    }
-
-    # Create the markers without using formula notation for color
-    map <- map %>%
-        addCircleMarkers(
-            lng = ~Longitude,
-            lat = ~Latitude,
-            color = sapply(sf_data_wgs84[[col]], assign_color),
-            stroke = TRUE,
-            radius = 10,
-            fillOpacity = 0.7,
-            label = lapply(sf_data_wgs84[[col]], function(x) paste("NO2 ug/m3 =", x)),
-            group = col
-        )
+  })
 }
 
-# Add remaining map elements
-map <- map %>%
+# Unified colour scale definitions
+colour_scales <- list(
+  who_no2 = list(
+    colours = c("blue", "green", "yellow", "orange", "#FF4500",
+               "#8B0000", "#DA70D6", "#4B0082", "#696969", "black", "white"),
+    thresholds = c(10, 20, 30, 40, 50, 60, 70, 80, 90, Inf),
+    labels = c("< 10: WHO safe level", "10-19: WHO Interim 3", "20-29: WHO Interim 2",
+               "30-39: WHO Interim 1/UK Limit", "40-49: Over UK limit",
+               "50-60: 5x WHO safe level", "60-70: 6x WHO safe level",
+               "70-80: 7x WHO safe level", "80-90: 8x WHO safe level",
+               "90-100: 9x WHO safe level", "Site not in use that year"),
+    title = "NO2 levels"
+  ),
+  deltas = list(
+    colours = c("#084594", "#2171B5", "#4292C6", "#6BAED6", "#9ECAE1",
+               "#FEE391", "#FEB24C", "#FB6A4A", "#DE2D26", "#A50F15", "white"),
+    thresholds = c(8, 6, 4, 2, 0, -2, -4, -6, -8, -Inf),
+    labels = c(">8", "6-8", "4-6", "2-4", "0-2",
+               "Increase 0-2", "increase of 2-4", "increase of 4-6",
+               "increase of 6-8", "increase over 8", "Site not in use"),
+    title = "Fall in NO2 levels, µg/m3, year on year"
+  )
+)
+
+# Get colour legend info from unified scale
+get_colour_legend <- function(scale = "who_no2") {
+  if (!scale %in% names(colour_scales)) {
+    stop("Unknown scale: ", scale)
+  }
+  with(colour_scales[[scale]], list(colors = colours, labels = labels, title = title))
+}
+
+# Assign colour to a value based on scale
+assign_colour <- function(value, scale = "who_no2") {
+  if (is.na(value) || !is.numeric(value)) return("white")
+  if (!scale %in% names(colour_scales)) stop("Invalid scale specified.")
+  
+  thresholds <- colour_scales[[scale]]$thresholds
+  colours <- colour_scales[[scale]]$colours
+  index <- findInterval(value, thresholds, left.open = TRUE)
+  return(colours[index])
+}
+
+# Create colour-coded icon set for schools
+create_school_icons <- function(school_sf) {
+  pal <- colorFactor(
+    palette = c("#1E90FF", "#32CD32"),
+    domain = unique(school_sf$Level)
+  )
+  icons <- makeSymbolsSize(
+    values = rep(2, length(school_sf$Level)),
+    shape = 'cross',
+    color = pal(school_sf$Level),
+    fillColor = pal(school_sf$Level),
+    baseSize = 10,
+    fillOpacity = 0.7
+  )
+  return(icons)
+}
+
+# Create a pollution map with optional school overlay ####
+create_pollution_map <- function(
+    data_file,
+    boroughs,
+    school_file = "none",
+    output_file = "pollution_map.html"
+) {
+  result <- prepare_data(data_file, required_cols = c("Easting", "Northing"))
+  data_long <- result$data |>
+    tidyr::pivot_longer(
+      cols = -c(Easting, Northing),
+      names_to = "year",
+      values_to = "NO2"
+    ) |>
+    dplyr::mutate(
+      year = lubridate::as_datetime(paste0(
+        stringr::str_extract(year, "\\d{4}"), "-01-01"))
+    )
+  sf_data_wgs84 <- transform_to_wgs84(data_long)
+  
+  if (school_file != "none") {
+    tryCatch({
+      result <- prepare_data(school_file, 
+                             required_cols = c("Easting", "Northing", "School", "Level"))
+      sf_schools_wgs84 <- transform_to_wgs84(result$data)
+      icons <- create_school_icons(sf_schools_wgs84)
+    }, error = function(e) {
+      warning("Schools file not found: ",school_file," School locations will not be plotted.")
+      school_file <<- "none"
+    })
+  }
+  
+  borough_sf <- get_borough_sf(boroughs)
+  vignette_overlay <- create_vignette_overlay(borough_sf)
+  bbox <- st_bbox(borough_sf)
+  legend_info <- get_colour_legend("who_no2")
+  
+  # create the main map object
+  map <- leaflet(sf_data_wgs84, options = leafletOptions(zoomSnap = 0, zoomDelta = 0.25)) %>%
+    addTiles()
+  
+  # add the dynamic layers
+  for (yr in unique(sf_data_wgs84$year_str)) {
+    subset_data <- sf_data_wgs84[sf_data_wgs84$year_str == yr, ]
+    map <- map %>%
+      addCircleMarkers(
+        data = subset_data,
+        lng = ~Longitude,
+        lat = ~Latitude,
+        color = sapply(subset_data$NO2, assign_colour, scale = "who_no2"),
+        stroke = TRUE,
+        radius = 10,
+        fillOpacity = 0.7,
+        label = lapply(subset_data$NO2, function(x) paste("NO2 ug/m3 =", x)),
+        group = yr
+      )
+  }
+  
+  # add borough and wards boundaries, vignette overlay, legend, and
+  # a control for which dynamic map layer is displayed
+  map <- map %>%
     addPolygons(
-        data = borough_sf,
-        color = "#078141",
-        weight = 2.5,
-        dashArray = "5, 10",
-        opacity = 0.75,
-        fillColor = "transparent",
-        fillOpacity = 0.1,
-        label = ~NAME,
-        labelOptions = labelOptions(
-            style = list(
-                "font-weight" = "bold",
-                padding = "3px 8px",
-                "background-color" = "rgba(255,255,255,0.7)",
-                "border-color" = "rgba(0,0,0,0.1)",
-                "border-radius" = "4px"
-            ),
-            textsize = "12px",
-            direction = "auto",
-            permanent = TRUE,
-            sticky = TRUE
-        )
+      data = borough_sf,
+      color = "#078141",
+      weight = 2.5,
+      dashArray = "5, 10",
+      opacity = 0.75,
+      fillColor = "transparent",
+      fillOpacity = 0.1,
+      label = ~NAME,
+      labelOptions = labelOptions(
+        style = list(
+          "font-weight" = "bold",
+          padding = "3px 8px",
+          "background-color" = "rgba(255,255,255,0.7)",
+          "border-color" = "rgba(0,0,0,0.1)",
+          "border-radius" = "4px"
+        ),
+        textsize = "12px",
+        direction = "auto",
+        permanent = TRUE,
+        sticky = TRUE
+      )
     ) %>%
     addLegend(
-    position = "bottomright",
-    colors = c("blue", "green", "yellow", "orange", "red", 
-               "#8B0000", "#8E388E", "purple", "#4D4D4D", "#000000", "white"),
-    labels = c("< 10: WHO safe level", 
-               "10-19: WHO Interim 3", 
-               "20-29: WHO Interim 2",
-               "30-39: WHO Interim 1/UK Limit", 
-               "40-49: Over UK limit",
-               "50-60: 5x WHO safe level", 
-               "60-70: 6x WHO safe level",
-               "70-80: 7x WHO safe level", 
-               "80-90: 8x WHO safe level",
-               "90-100: 9x WHO safe level", 
-               "Site not in use that year"),
-    title = "NO2 levels"
+      position = "bottomright",
+      colors = legend_info$colors,
+      labels = legend_info$labels,
+      title = "NO2 levels"
     ) %>%
     addPolygons(
-        data = inverse_polygon,
-        fillColor = "grey",
-        fillOpacity = 0.4,
-        color = "transparent",
-        weight = 0
+      data = vignette_overlay,
+      fillColor = "grey",
+      fillOpacity = 0.4,
+      color = "transparent",
+      weight = 0
     ) %>%
-  fitBounds(
-    lng1 = unname(original_bbox["xmin"]),
-    lat1 = unname(original_bbox["ymin"]),
-    lng2 = unname(original_bbox["xmax"]),
-    lat2 = unname(original_bbox["ymax"]),
-    options = list(padding = c(30, 30))
-  ) %>%
+    fitBounds(
+      lng1 = unname(bbox["xmin"]),
+      lat1 = unname(bbox["ymin"]),
+      lng2 = unname(bbox["xmax"]),
+      lat2 = unname(bbox["ymax"]),
+      options = list(padding = c(30, 30))
+    ) %>%
     addLayersControl(
-        baseGroups = value_columns,
-        options = layersControlOptions(collapsed = FALSE)
-    ) %>% addMarkers(
+      baseGroups = unique(sf_data_wgs84$year_str),
+      options = layersControlOptions(collapsed = FALSE)
+    )
+  # add schools markers if they are indicated
+  if (school_file != "none") {
+    map <- map %>% addMarkers(
       data = sf_schools_wgs84,
       lng = ~Longitude,
       lat = ~Latitude,
       icon = icons,
       label = ~School
     )
-
-# Display the map
-map
-
-# Save the map with error handling
-tryCatch({
-    library(htmlwidgets)
-    saveWidget(map, file = "Wandsworth_Merton_Schools_NO2.html")
-}, error = function(e) {
+  }
+  
+  tryCatch({
+    htmlwidgets::saveWidget(map, file = output_file)
+  }, error = function(e) {
     warning("Could not save map to file: ", e$message)
-})
+  })
+  
+  return(invisible(map))
+}
 
+
+
+
+
+# Main script ####
+
+map_to_display <- create_pollution_map(
+  data_file = "your_data_Merton.csv",
+  school_file = "your_schools_Merton.csv",
+  boroughs = "Merton",
+  output_file = "merton_pollution_map.html"
+)
+
+map_to_display
