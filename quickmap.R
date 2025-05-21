@@ -11,23 +11,27 @@
 #     plot points on a leaflet map with selector by year (time slice)
 #     offers more than one colour and labelling scheme, currently WHO NO2 and 
 #     small value changes
-#   Friday 250516: 0.1
+#   250516: 0.1
 #     code adjusted to work with long data, OA format.
 #     code works in this current alpha. need to add back in the
 #     schools locations on next task.
-#   Monday 250519: 0.2
+#   250519: 0.2
 #     these steps completed. Checkpoint uploaded to GitHub.
 #     fault tolerance for filenames and borough names improved
-#   Tuesday 250520: 0.3
+#   250520: 0.3
 #     fixed issue with the assign_color returning one interval too high
 #     added code to export each years map as an image
 #     added a year label to each map
 #     added a label scheme for "lbrut_no2" showing appropriate limits
 #     many small adjustments to improve appearance
-#   To do
-#     test with direct output from BL input data in OA format
+#   250521: v0.4 now included data from the Breathe London nodes overlaid as
+#   squares, and optional Labels in the CSV/DT input file. Code now needs a good
+#   bit of simplification as there's a lot that could be reused. 
+# To do
 #     add a colour scale for PM2.5
 #     part done: improve code efficiency
+#     move year & title to middle top and add banner text as an input instead of hard coded
+#     move controls to one place on the map
 
 # Install and load required packages
 packages <- c("leaflet", "sf", "dplyr", "leaflegend", "webshot2","htmlwidgets")
@@ -44,32 +48,50 @@ lapply(packages, library, character.only = TRUE)
 # function definitions ####
 
 # import and prepares the data from csv files in wide format ####
-prepare_data <- function(file_path, required_cols = c("Easting", "Northing")) {
-  # Read the CSV file
+# import_csv_data <- function(file_path, required_cols = c("Easting", "Northing")) {
+#   # Read the CSV file
+#   data <- read.csv(file_path, stringsAsFactors = FALSE, 
+#                    check.names = FALSE, na.strings = c("", "NA", "NaN"))
+#   
+#   # Clean the data frame column names to remove the X prefix if present
+#   names(data) <- gsub("^X", "", names(data))
+#   
+#   # Check if the required columns are present after cleaning
+#   if (!all(required_cols %in% names(data))) {
+#     stop(paste("Missing required columns:", paste(setdiff(required_cols, names(data)), collapse = ", ")))
+#   }
+#   
+#   # Filter out rows with NA in any of the required columns
+#   data <- data[complete.cases(data[, required_cols]), ]
+#   
+#   # Identify value columns (excluding coordinate columns)
+#   value_columns <- names(data)[!names(data) %in% c("Easting", "Northing")]
+#   
+#   # Ensure that there is at least one value column
+#   if (length(value_columns) == 0) {
+#     stop("No value columns found in data")
+#   }
+#   
+#   # Return a list containing the cleaned data and the value columns
+#   return(list(data = data, value_columns = value_columns))
+# }
+
+import_csv_data <- function(file_path, required_cols = c("Easting", "Northing")) {
   data <- read.csv(file_path, stringsAsFactors = FALSE, 
                    check.names = FALSE, na.strings = c("", "NA", "NaN"))
-  
-  # Clean the data frame column names to remove the X prefix if present
   names(data) <- gsub("^X", "", names(data))
-  
-  # Check if the required columns are present after cleaning
   if (!all(required_cols %in% names(data))) {
     stop(paste("Missing required columns:", paste(setdiff(required_cols, names(data)), collapse = ", ")))
   }
-  
-  # Filter out rows with NA in any of the required columns
+  if ("Label" %in% names(data)) {
+    required_cols <- unique(c(required_cols, "Label"))
+  }
   data <- data[complete.cases(data[, required_cols]), ]
-  
-  # Identify value columns (excluding coordinate columns)
-  value_columns <- names(data)[!names(data) %in% c("Easting", "Northing")]
-  
-  # Ensure that there is at least one value column
+  value_columns <- setdiff(names(data), required_cols)
   if (length(value_columns) == 0) {
     stop("No value columns found in data")
   }
-  
-  # Return a list containing the cleaned data and the value columns
-  return(list(data = data, value_columns = value_columns))
+  list(data = data, value_columns = value_columns)
 }
 
 
@@ -84,6 +106,8 @@ get_borough_sf <- function(borough, crs = 4326) {
   # Improvement option - update to include the MSOAs and LSOAs, though this would
   # intermix 2014 L/MSOA files with ward boundaries from 2018, which may not
   # be aligned. Check for national source of current data?
+  # Returns the result in latitude-longitude coordinates (CRS 4326).
+  
   load(file.path(Sys.getenv("DATA_PATH"), "ward_boundaries.Rdata"))
   
   # Standardise input
@@ -134,9 +158,13 @@ get_borough_sf <- function(borough, crs = 4326) {
     st_transform(crs = crs)
 }
 
-# helper function to convert from OS northings and eastings, 
-# optionally adding year_str (probably not needed as moved to OA long data tables)
-transform_to_wgs84 <- function(df, easting = "Easting", northing = "Northing", crs_from = 27700) {
+# helper function to convert from OS northings and eastings (CRS 27700) to standard
+# latitude-longitude coordinates (CRS 4326) optionally adding year_str (probably
+# not needed as moved to OA long data tables)
+transform_to_wgs84 <- function(df, 
+                               easting = "Easting", 
+                               northing = "Northing", 
+                               crs_from = 27700) {
   tryCatch({
     sf_obj <- sf::st_as_sf(df, coords = c(easting, northing), crs = crs_from) |>
       sf::st_transform(crs = 4326)
@@ -175,7 +203,7 @@ create_vignette_overlay <- function(spatial_feature) {
   })
 }
 
-# Unified colour scale definitions
+# Unified colour scale definitions ####
 colour_scales <- list(
   who_no2 = list(
     colours = c("blue", "green", "yellow", "orange", "#FF4500",
@@ -186,9 +214,21 @@ colour_scales <- list(
                "50-60: 5x WHO safe level", "60-70: 6x WHO safe level",
                "70-80: 7x WHO safe level", "80-90: 8x WHO safe level",
                "90-100: 9x WHO safe level", "Site not in use that year"),
-    title = "NO2 levels"
+    title = "NO2 levels",
+    shape = "circle"
   ),
   lbrut_no2 = list(
+    colours = c("blue", "green", "yellow", "orange", "#FF4500",
+                "#8B0000", "#DA70D6", "#4B0082", "#696969", "black", "white"),
+    thresholds = c(0, 10, 20, 30, 40, 50, 60, 70, 80, 90, Inf),
+    labels = c("< 10: WHO safe level", "10-19: under Richmond limit", "20-29: WHO Interim 2",
+               "30-39: under UK limit", "40-49: Over UK limit",
+               "50-60: 5x WHO safe level", "60-70: 6x WHO safe level",
+               "70-80: 7x WHO safe level", "80-90: 8x WHO safe level",
+               "90-100: 9x WHO safe level", "Site not in use that year"),
+    title = "NO2 levels"
+  ),
+  bl_no2 = list(
     colours = c("blue", "green", "yellow", "orange", "#FF4500",
                 "#8B0000", "#DA70D6", "#4B0082", "#696969", "black", "white"),
     thresholds = c(0, 10, 20, 30, 40, 50, 60, 70, 80, 90, Inf),
@@ -207,6 +247,12 @@ colour_scales <- list(
                "Increase 0-2", "increase of 2-4", "increase of 4-6",
                "increase of 6-8", "increase over 8", "Site not in use"),
     title = "Fall in NO2 levels, µg/m3, year on year"
+  ),
+  schools = list(
+    colours = c("#1E90FF", "#32CD32"),
+    domain = c("Primary", "Secondary"),
+    labels = c("Primary", "Secondary"),
+    title = "School Level"
   )
 )
 
@@ -248,17 +294,27 @@ create_school_icons <- function(school_sf) {
 
 # MAIN FUNCTION create_pollution_map: map data with optional school/points overlay ####
 create_pollution_map <- function(
-    data_file,
+    csv_data_file,
+    oa_data_file = "none",
     boroughs,
     school_file = "none",
     output_file = "pollution_map.html",
     image_export = FALSE,
     label_scheme = "who_no2"
 ) {
-  result <- prepare_data(data_file, required_cols = c("Easting", "Northing"))
+  # data loading section
+  # first the CSV file of DT 
+  result <- import_csv_data(csv_data_file, required_cols = c("Easting", "Northing"))
+  
+  # Dynamically determine non-value columns
+  non_value_cols <- c("Easting", "Northing")
+  if ("Label" %in% names(result$data)) {
+    non_value_cols <- c(non_value_cols, "Label")
+  }
+  
   data_long <- result$data |>
     tidyr::pivot_longer(
-      cols = -c(Easting, Northing),
+      cols = -all_of(non_value_cols),
       names_to = "year",
       values_to = "NO2"
     ) |>
@@ -266,12 +322,14 @@ create_pollution_map <- function(
       year = lubridate::as_datetime(paste0(
         stringr::str_extract(year, "\\d{4}"), "-01-01"))
     )
+  
   sf_data_wgs84 <- transform_to_wgs84(data_long)
   
+  # then the location of the schools
   if (school_file != "none") {
     tryCatch({
       sf_schools_wgs84 <- transform_to_wgs84(
-        prepare_data(school_file, 
+        import_csv_data(school_file, 
                      required_cols = c("Easting", "Northing", "School", "Level"))$data
       )
       icons <- create_school_icons(sf_schools_wgs84)
@@ -281,6 +339,30 @@ create_pollution_map <- function(
     })
   }
   
+  # then the Breath London data in OpenAir (long) format 
+  if (oa_data_file != "none") {
+    tryCatch({
+      load(file.path(Sys.getenv("DATA_PATH"), oa_data_file), verbose = TRUE)
+      bl_annual_means_sf <- dataOAformat |>
+             group_by(siteCode, year) |>
+             summarise(
+                   annual_no2 = mean(no2, na.rm = TRUE),
+                   annual_pm25 = mean(pm25, na.rm = TRUE),
+                   lat = first(lat),
+                   lon = first(lon),
+                   yr = as.character(first(year)),
+                   .groups = "drop"
+               ) |> 
+        st_as_sf(coords = c("lon","lat"), crs = 4326) |>
+        mutate(year_str = as.character(year))
+      coords <- st_coordinates(bl_annual_means_sf)
+      bl_annual_means_sf$Longitude <- coords[, 1]
+      bl_annual_means_sf$Latitude <- coords[, 2]
+    }, error = function(e) {
+      warning("Breathe London file not found: ",oa_data_file," School locations will not be plotted.")
+      oa_data_file <- "none"
+    })
+  }
   borough_sf <- tryCatch(
     get_borough_sf(boroughs),
     error = function(e) {
@@ -299,7 +381,58 @@ create_pollution_map <- function(
   
   # add the dynamic layers
   for (yr in unique(sf_data_wgs84$year_str)) {
+    # if required add breathe london data as a bottom layer 
+    if (oa_data_file != "none") {
+      # Subset and filter OA data for this year
+      oa_subset <- bl_annual_means_sf[bl_annual_means_sf$year_str == yr, ]
+      
+
+      # v3 kinda vectorised
+      if (nrow(oa_subset) > 0) {
+        dx <- 0.001
+        dy <- dx * cos(oa_subset$Latitude * pi / 180)
+        rects <- mapply(
+          function(lon, lat, x, y) {
+            st_polygon(list(matrix(c(
+              lon - x, lat - y,
+              lon - x, lat + y,
+              lon + x, lat + y,
+              lon + x, lat - y,
+              lon - x, lat - y
+            ), ncol = 2, byrow = TRUE)))
+          },
+          oa_subset$Longitude, oa_subset$Latitude, dx, dy,
+          SIMPLIFY = FALSE
+        )
+        oa_rect_sf <- st_sf(
+          geometry = st_sfc(rects, crs = 4326),
+          fillColor = sapply(oa_subset$annual_no2, 
+                             assign_colour, scale = label_scheme),
+          label = paste("BL NO2: ",round(oa_subset$annual_no2, 1),"ug/m3")
+        )
+        map <- map %>%
+          addPolygons(
+            data = oa_rect_sf,
+            fillColor = ~fillColor,
+            fillOpacity = 0.7,
+            color = "black",
+            weight = 1,
+            label = ~label,
+            group = yr
+          )
+      }
+    }
+    
     subset_data <- sf_data_wgs84[sf_data_wgs84$year_str == yr, ]
+    
+    # Create labels based on presence of "Label" column
+    labels <- if ("Label" %in% names(subset_data)) {
+#      paste(subset_data$Label,":", subset_data$NO2, "ug/m3")
+      paste(subset_data$Label)
+    } else {
+      paste("NO2:", subset_data$NO2, "ug/m3")
+    }
+    
     map <- map %>%
       addCircleMarkers(
         data = subset_data,
@@ -309,9 +442,19 @@ create_pollution_map <- function(
         stroke = TRUE,
         radius = 10,
         fillOpacity = 0.7,
-        label = lapply(subset_data$NO2, function(x) paste("NO2 ug/m3 =", x)),
-        group = yr
-      ) %>% addLabelOnlyMarkers(
+        group = yr,
+        label = labels,
+        labelOptions = labelOptions(
+          noHide = TRUE,
+          direction = "top",
+          textOnly = TRUE,
+          style = list(
+            "font-size" = "11px",
+            "background-color" = "rgba(255,255,255,0.7)",
+            "padding" = "1px"
+          )
+        )
+      ) %>% addLabelOnlyMarkers( # this overlays the year on the map
         data = data.frame(
           Longitude = bbox["xmin"] + 0.005,
           Latitude = bbox["ymin"] + 0.005
@@ -337,7 +480,7 @@ create_pollution_map <- function(
   # add borough and wards boundaries, vignette overlay, legend, and
   # a control for which dynamic map layer is displayed
   map <- map %>%
-    addPolygons(
+    addPolygons( 
       data = borough_sf,
       color = "#078141",
       weight = 2.5,
@@ -354,9 +497,9 @@ create_pollution_map <- function(
           "border-color" = "rgba(0,0,0,0.1)",
           "border-radius" = "4px"
         ),
-        textsize = "12px",
+        textsize = "11px",
         direction = "auto",
-        permanent = TRUE,
+        noHide = FALSE,
         sticky = TRUE
       )
     ) %>%
@@ -480,8 +623,6 @@ create_pollution_map <- function(
     }
     return(invisible(map))
   }
-  
-  
   return(invisible(map))
 }
 
@@ -489,7 +630,8 @@ create_pollution_map <- function(
 # Main script ####
 
 map_to_display <- create_pollution_map(
-  data_file = "your_data_Richmond.csv",
+  csv_data_file = "your_data_Richmond.csv",
+  oa_data_file = "complete_breathe_london_210122-250422.Rdata",
   boroughs = c("Richmond"),
   output_file = "richmond_no2_map_asr.html",
   image_export = F,
