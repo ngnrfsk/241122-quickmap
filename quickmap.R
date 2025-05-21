@@ -1,28 +1,29 @@
 # Working alpha codebase for quickmap
-# this version 0.2
-# Includes:
-#   importing NO2 and schools data from CSV file into a simple format table
-#   plot points on a leaflet map with selector by year (time slice)
-#   offers more than one colour and labelling scheme, currently WHO NO2 and 
-#   small value changes
+# Version 0.3
 # Objectives:
 #   done: modify to use create and data in OpenAir format (eg wide rather than long) 
 #   done: make into a set of standalone functions to be integrated with OAPL library
 #   done: replace redundant code with functions (e.g. use assign_colour in later map
 #         layers, and add scope to keep labels in a vector)
 # History
-#   Friday 250516:
+#   Original scripts:
+#     imports NO2 and schools data from CSV file into a simple format table
+#     plot points on a leaflet map with selector by year (time slice)
+#     offers more than one colour and labelling scheme, currently WHO NO2 and 
+#     small value changes
+#   Friday 250516: 0.1
 #     code adjusted to work with long data, OA format.
 #     code works in this current alpha. need to add back in the
 #     schools locations on next task.
-#   Monday 250519:
+#   Monday 250519: 0.2
 #     these steps completed. Checkpoint uploaded to GitHub.
 #     fault tolerance for filenames and borough names improved
-#   Tuesday 250520:
+#   Tuesday 250520: 0.3
 #     fixed issue with the assign_color returning one interval too high
-#     added code to export each map as an image
+#     added code to export each years map as an image
 #     added a year label to each map
 #     added a label scheme for "lbrut_no2" showing appropriate limits
+#     many small adjustments to improve appearance
 #   To do
 #     test with direct output from BL input data in OA format
 #     add a colour scale for PM2.5
