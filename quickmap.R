@@ -28,10 +28,23 @@
 #   squares, and optional Labels in the CSV/DT input file. Code now needs a good
 #   bit of simplification as there's a lot that could be reused. 
 # To do
-#     add a colour scale for PM2.5
-#     part done: improve code efficiency
-#     move year & title to middle top and add banner text as an input instead of hard coded
-#     move controls to one place on the map
+#.  Appearances
+#     Add colour scale for PM2.5, labels for Wandsworth & Merton NO2
+#     Move year & title to middle top and add banner text as an input instead of hard coded.
+#     Move controls to one place on the map.
+#.  Improve code efficiency
+#     . Separate the data loading tasks (should really only be done once at least
+#     for the huge BL dataset) and the mapping tasks. 
+#.    . Treat data loading type independently from data transformation to make it
+#     input dat type independent
+#     . Modularise and reuse the
+#     mapping code for both HTML map generation and statis impage export
+#     . Modularise and resuse the symbol generation and colour assingment code
+#     Allow subsetting by year for static or dynamic maps 
+#     Potential future solution
+#     - Load datasets
+#     - Subselect to the desired data (years, locations, pollutants/layers, data sources)
+#     - Generate desired layers and output types (HTML or static images)
 
 # Install and load required packages
 packages <- c("leaflet", "sf", "dplyr", "leaflegend", "webshot2","htmlwidgets")
@@ -221,23 +234,60 @@ colour_scales <- list(
     colours = c("blue", "green", "yellow", "orange", "#FF4500",
                 "#8B0000", "#DA70D6", "#4B0082", "#696969", "black", "white"),
     thresholds = c(0, 10, 20, 30, 40, 50, 60, 70, 80, 90, Inf),
-    labels = c("< 10: WHO safe level", "10-19: under Richmond limit", "20-29: WHO Interim 2",
-               "30-39: under UK limit", "40-49: Over UK limit",
+    labels = c("< 10: WHO safe level", "10-19: Under Richmond target", "20-29: WHO Interim 2",
+               "30-39: Under UK target", "40-49: Over UK target",
                "50-60: 5x WHO safe level", "60-70: 6x WHO safe level",
                "70-80: 7x WHO safe level", "80-90: 8x WHO safe level",
                "90-100: 9x WHO safe level", "Site not in use that year"),
     title = "NO2 levels"
   ),
-  bl_no2 = list(
+  lbw_no2 = list(
     colours = c("blue", "green", "yellow", "orange", "#FF4500",
                 "#8B0000", "#DA70D6", "#4B0082", "#696969", "black", "white"),
     thresholds = c(0, 10, 20, 30, 40, 50, 60, 70, 80, 90, Inf),
-    labels = c("< 10: WHO safe level", "10-19: under Richmond limit", "20-29: WHO Interim 2",
-               "30-39: under UK limit", "40-49: Over UK limit",
+    labels = c("< 10: WHO safe level", "10-19: WHO Interim 3", 
+               "20-29: Under Wandsworth target",
+               "30-39: Under UK target", "40-49: Over UK target",
                "50-60: 5x WHO safe level", "60-70: 6x WHO safe level",
                "70-80: 7x WHO safe level", "80-90: 8x WHO safe level",
                "90-100: 9x WHO safe level", "Site not in use that year"),
     title = "NO2 levels"
+  ),
+  lbm_no2 = list(
+    colours = c("blue", "green", "yellow", "orange", "#FF4500",
+                "#8B0000", "#DA70D6", "#4B0082", "#696969", "black", "white"),
+    thresholds = c(0, 10, 20, 30, 40, 50, 60, 70, 80, 90, Inf),
+    labels = c("< 10: WHO safe level", "10-19: WHO Interim 3", "20-29: WHO Interim 2",
+               "30-39: UK/WHO Interim 1 target", "40-49: Over UK target",
+               "50-60: 5x WHO safe level", "60-70: 6x WHO safe level",
+               "70-80: 7x WHO safe level", "80-90: 8x WHO safe level",
+               "90-100: 9x WHO safe level", "Site not in use that year"),
+    title = "NO2 levels"
+  ),
+  gla_pm25 = list(
+    colours = c(
+      "darkblue",   # 0–5
+      "blue",       # 5–7.5
+      "lightgreen", # 7.5–10
+      "yellow",     # 10–12.5
+      "orange",     # 12.5–15
+      "darkorange", # 15–20
+      "red",        # 20–25
+      "darkred",    # 25–Inf
+      "white"       # NA
+    ),
+    thresholds = c(0, 5, 7.5, 10, 12.5, 15, 20, 25, Inf),
+    labels = c(
+      "< 5: WHO safe level", "5-7.5",
+      "7.5-10 Under GLA/WHO Interim 1 target",
+      "10-12.5", 
+      "12.5-15: Under WHO Interim 2 target",
+      "15-20: Under UK target", 
+      "20-25: Under WHO Interim 2 target",
+      "> 25", 
+      "Site not in use that year"
+    ),
+    title = "PM2.5 annual ug/m3"
   ),
   deltas = list(
     colours = c("#084594", "#2171B5", "#4292C6", "#6BAED6", "#9ECAE1",
@@ -293,37 +343,43 @@ create_school_icons <- function(school_sf) {
 }
 
 # MAIN FUNCTION create_pollution_map: map data with optional school/points overlay ####
-create_pollution_map <- function(
-    csv_data_file,
+create_pollution_map <- function( 
+    csv_data_file = "none",
     oa_data_file = "none",
     boroughs,
     school_file = "none",
     output_file = "pollution_map.html",
     image_export = FALSE,
-    label_scheme = "who_no2"
+    label_scheme = "who_no2",
+    title_prefix = "",
+    legend_title = "Annual NO2, ug/m3"
 ) {
   # data loading section
-  # first the CSV file of DT 
-  result <- import_csv_data(csv_data_file, required_cols = c("Easting", "Northing"))
   
-  # Dynamically determine non-value columns
-  non_value_cols <- c("Easting", "Northing")
-  if ("Label" %in% names(result$data)) {
-    non_value_cols <- c(non_value_cols, "Label")
+  if (csv_data_file != "none"){
+  
+    # first the CSV file of DT 
+    result <- import_csv_data(csv_data_file, required_cols = c("Easting", "Northing"))
+    
+    # Dynamically determine non-value columns
+    non_value_cols <- c("Easting", "Northing")
+    if ("Label" %in% names(result$data)) {
+      non_value_cols <- c(non_value_cols, "Label")
+    }
+    
+    data_long <- result$data |>
+      tidyr::pivot_longer(
+        cols = -all_of(non_value_cols),
+        names_to = "year",
+        values_to = "NO2"
+      ) |>
+      dplyr::mutate(
+        year = lubridate::as_datetime(paste0(
+          stringr::str_extract(year, "\\d{4}"), "-01-01"))
+      )
+    
+    sf_data_wgs84 <- transform_to_wgs84(data_long)
   }
-  
-  data_long <- result$data |>
-    tidyr::pivot_longer(
-      cols = -all_of(non_value_cols),
-      names_to = "year",
-      values_to = "NO2"
-    ) |>
-    dplyr::mutate(
-      year = lubridate::as_datetime(paste0(
-        stringr::str_extract(year, "\\d{4}"), "-01-01"))
-    )
-  
-  sf_data_wgs84 <- transform_to_wgs84(data_long)
   
   # then the location of the schools
   if (school_file != "none") {
@@ -346,8 +402,8 @@ create_pollution_map <- function(
       bl_annual_means_sf <- dataOAformat |>
              group_by(siteCode, year) |>
              summarise(
-                   annual_no2 = mean(no2, na.rm = TRUE),
-                   annual_pm25 = mean(pm25, na.rm = TRUE),
+                   no2 = mean(no2, na.rm = TRUE),
+                   pm25 = mean(pm25, na.rm = TRUE),
                    lat = first(lat),
                    lon = first(lon),
                    yr = as.character(first(year)),
@@ -363,6 +419,8 @@ create_pollution_map <- function(
       oa_data_file <- "none"
     })
   }
+
+  # setup the bounding box and overlay
   borough_sf <- tryCatch(
     get_borough_sf(boroughs),
     error = function(e) {
@@ -375,19 +433,23 @@ create_pollution_map <- function(
   bbox <- st_bbox(borough_sf)
   legend_info <- get_colour_legend(label_scheme)
   
+  # if the Diffusion Tube data isn't to be used, use the BL data for the map  
+  if (csv_data_file == "none") sf_data_wgs84 <- bl_annual_means_sf
+  
   # create the main map object
-  map <- leaflet(sf_data_wgs84, options = leafletOptions(zoomSnap = 0, zoomDelta = 0.25)) %>%
+  map <- leaflet(sf_data_wgs84, 
+                 options = leafletOptions(zoomSnap = 0, zoomDelta = 0.25)) %>%
     addTiles()
   
-  # add the dynamic layers
+  # add the dynamic layers to the HMTL map
   for (yr in unique(sf_data_wgs84$year_str)) {
+
     # if required add breathe london data as a bottom layer 
     if (oa_data_file != "none") {
       # Subset and filter OA data for this year
       oa_subset <- bl_annual_means_sf[bl_annual_means_sf$year_str == yr, ]
       
-
-      # v3 kinda vectorised
+      # partially vectorised creation of overlaid Breathe London site data
       if (nrow(oa_subset) > 0) {
         dx <- 0.001
         dy <- dx * cos(oa_subset$Latitude * pi / 180)
@@ -406,9 +468,12 @@ create_pollution_map <- function(
         )
         oa_rect_sf <- st_sf(
           geometry = st_sfc(rects, crs = 4326),
-          fillColor = sapply(oa_subset$annual_no2, 
-                             assign_colour, scale = label_scheme),
-          label = paste("BL NO2: ",round(oa_subset$annual_no2, 1),"ug/m3")
+          # fillColor = sapply(oa_subset$no2, 
+          #                    assign_colour, scale = label_scheme),
+#          label = paste("BL NO2: ",round(oa_subset$no2, 1),"ug/m3")
+          fillColor = sapply(oa_subset$pm25, 
+                   assign_colour, scale = label_scheme),
+          label = paste(round(oa_subset$pm25, 0),"ug/m3")
         )
         map <- map %>%
           addPolygons(
@@ -418,63 +483,82 @@ create_pollution_map <- function(
             color = "black",
             weight = 1,
             label = ~label,
-            group = yr
-          )
+            group = yr, 
+            labelOptions = labelOptions(
+              noHide = TRUE,
+              direction = "top", #NOW
+              textOnly = TRUE,
+              style = list(
+                "font-size" = "11px",
+                "background-color" = "rgba(255,255,255,0.7)",
+                "padding" = "1px"
+              )
+            )
+          ) 
       }
     }
     
-    subset_data <- sf_data_wgs84[sf_data_wgs84$year_str == yr, ]
-    
-    # Create labels based on presence of "Label" column
-    labels <- if ("Label" %in% names(subset_data)) {
-#      paste(subset_data$Label,":", subset_data$NO2, "ug/m3")
-      paste(subset_data$Label)
-    } else {
-      paste("NO2:", subset_data$NO2, "ug/m3")
+    # if required add the Diffusion Tube data as the next layer
+    if (csv_data_file != "none"){
+      subset_data <- sf_data_wgs84[sf_data_wgs84$year_str == yr, ]
+      
+      # Create labels based on presence of "Label" column
+      labels <- if ("Label" %in% names(subset_data)) {
+        #      paste(subset_data$Label,":", subset_data$NO2, "ug/m3")
+        paste(subset_data$Label)
+      } else {
+        paste("NO2:", subset_data$NO2, "ug/m3")
+      }
+      
+      map <- map %>%
+        addCircleMarkers(
+          data = subset_data,
+          lng = ~Longitude,
+          lat = ~Latitude,
+          color = sapply(subset_data$NO2, assign_colour, scale = label_scheme),
+          stroke = TRUE,
+          radius = 10,
+          fillOpacity = 0.7,
+          group = yr,
+          label = labels,
+          labelOptions = labelOptions(
+            noHide = TRUE,
+            direction = "auto",
+            textOnly = TRUE,
+            style = list(
+              "font-size" = "11px",
+              "background-color" = "rgba(255,255,255,0.7)",
+              "padding" = "1px"
+            )
+          )
+        )      
     }
     
+    # finally add the title
     map <- map %>%
-      addCircleMarkers(
-        data = subset_data,
-        lng = ~Longitude,
-        lat = ~Latitude,
-        color = sapply(subset_data$NO2, assign_colour, scale = label_scheme),
-        stroke = TRUE,
-        radius = 10,
-        fillOpacity = 0.7,
-        group = yr,
-        label = labels,
-        labelOptions = labelOptions(
-          noHide = TRUE,
-          direction = "top",
-          textOnly = TRUE,
-          style = list(
-            "font-size" = "11px",
-            "background-color" = "rgba(255,255,255,0.7)",
-            "padding" = "1px"
-          )
-        )
-      ) %>% addLabelOnlyMarkers( # this overlays the year on the map
+      addLabelOnlyMarkers(
         data = data.frame(
-          Longitude = bbox["xmin"] + 0.005,
-          Latitude = bbox["ymin"] + 0.005
+          Longitude = (bbox["xmin"] + bbox["xmax"]) / 2,
+          Latitude = bbox["ymax"] - 0.025 * (bbox["ymax"] - bbox["ymin"])
         ),
         lng = ~Longitude,
         lat = ~Latitude,
-        label = yr,
         group = yr,
+        label = paste0(title_prefix," ",yr),
         labelOptions = labelOptions(
           noHide = TRUE,
           direction = "top",
           textOnly = TRUE,
           style = list(
             "font-weight" = "bold",
-            "font-size" = "24px",
+            "font-size" = "18px",
             "background-color" = "rgba(255,255,255,0.8)",
-            "padding" = "4px"
+            "padding" = "2px",
+            "text-align" = "center"
           )
         )
-      ) 
+      )
+ 
   }
   
   # add borough and wards boundaries, vignette overlay, legend, and
@@ -489,7 +573,7 @@ create_pollution_map <- function(
       fillColor = "transparent",
       fillOpacity = 0.1,
       label = ~NAME,
-      labelOptions = labelOptions(
+      labelOptions = labelOptions( # labels for wards
         style = list(
           "font-weight" = "bold",
           padding = "3px 8px",
@@ -507,7 +591,7 @@ create_pollution_map <- function(
       position = "bottomright",
       colors = legend_info$colors,
       labels = legend_info$labels,
-      title = "NO2 levels"
+      title = legend_title
     ) %>%
     addPolygons(
       data = vignette_overlay,
@@ -550,6 +634,19 @@ create_pollution_map <- function(
     dir.create("map_images", showWarnings = FALSE)
     for (yr in unique(sf_data_wgs84$year_str)) {
       subset_data <- sf_data_wgs84[sf_data_wgs84$year_str == yr, ]
+      # Create labels based on presence of "Label" column
+      labels <- if ("Label" %in% names(subset_data)) {
+        #      paste(subset_data$Label,":", subset_data$NO2, "ug/m3")
+        paste(subset_data$Label)
+      } else {
+        paste("NO2:", subset_data$NO2, "ug/m3")
+      }
+      # Add jitter to coordinates for labels
+      coords <- subset_data %>%
+        mutate(
+          lbl_lon = Longitude + rnorm(n(), sd = 0.0001),  # jitter longitude
+          lbl_lat = Latitude  + rnorm(n(), sd = 0.0001)   # jitter latitude
+        )
       yearly_map <- leaflet(subset_data, 
                             options = 
                               leafletOptions(
@@ -557,14 +654,33 @@ create_pollution_map <- function(
                               zoomSnap = 0, 
                               zoomDelta = 0.25)) %>%
         addTiles() %>%
+        # Marker layer: no labels here
         addCircleMarkers(
           lng = ~Longitude,
           lat = ~Latitude,
           color = sapply(subset_data$NO2, assign_colour, scale = label_scheme),
           stroke = TRUE,
           radius = 10,
-          fillOpacity = 0.7,
-          label = lapply(subset_data$NO2, function(x) paste("NO2 ug/m3 =", x))
+          fillOpacity = 0.7
+        ) %>%
+        # Label layer: permanent, jittered positions to reduce overlap a bit
+        addLabelOnlyMarkers(
+          data = coords,
+          lng = ~lbl_lon,
+          lat = ~lbl_lat,
+          label = labels,
+          labelOptions = labelOptions(
+            noHide = TRUE,
+            textOnly = TRUE,
+            direction = "auto",
+            style = list(
+              "font-weight" = "bold",
+              "background-color" = "rgba(255,255,255,0.25)",
+              "font-size" = "13px",
+              "padding" = "1px"
+            ),
+            labelRepel = TRUE
+          )
         ) %>%
         addPolygons(
           data = vignette_overlay,
@@ -572,24 +688,28 @@ create_pollution_map <- function(
           fillOpacity = 0.4,
           color = "transparent",
           weight = 0
-        ) %>%
+        ) %>% # add yearly titles to the maps
         addLabelOnlyMarkers(
           data = data.frame(
-            Longitude = bbox["xmin"] + 0.005,
-            Latitude = bbox["ymin"] + 0.005
+            Longitude = bbox["xmin"] + 
+              0.025 * (bbox["xmax"] - bbox["xmin"]) / cos(pi * bbox["ymax"] / 180),
+            Latitude  = bbox["ymax"] - 
+              0.025 * (bbox["ymax"] - bbox["ymin"])
           ),
           lng = ~Longitude,
           lat = ~Latitude,
-          label = yr,
+          label = paste0(title_prefix," ", yr),  # space preserved
           labelOptions = labelOptions(
             noHide = TRUE,
-            direction = "top",
+            direction = "auto",  # adaptive placement
             textOnly = TRUE,
             style = list(
               "font-weight" = "bold",
               "font-size" = "24px",
-              "background-color" = "rgba(255,255,255,0.8)",
-              "padding" = "4px"
+              "background-color" = "rgba(255,255,255,0.8)", 
+              "padding" = "4px",
+              "white-space" = "nowrap",
+              "text-align" = "left"
             )
           )
         ) %>%
@@ -619,7 +739,7 @@ create_pollution_map <- function(
       img_file <- file.path("map_images", paste0(file_parts, "_", yr, ".jpg"))
       
       saveWidget(yearly_map, file = html_file, selfcontained = TRUE)
-      webshot2::webshot(url = html_file, file = img_file, vwidth = 900, vheight = 700)
+      webshot2::webshot(url = html_file, file = img_file, vwidth = 1200, vheight = 1200)
     }
     return(invisible(map))
   }
@@ -631,11 +751,24 @@ create_pollution_map <- function(
 
 map_to_display <- create_pollution_map(
   csv_data_file = "your_data_Richmond.csv",
-  oa_data_file = "complete_breathe_london_210122-250422.Rdata",
+  oa_data_file = "breathe_london_imperial_annualised_2021_2025_to_250422.Rdata",
   boroughs = c("Richmond"),
   output_file = "richmond_no2_map_asr.html",
-  image_export = F,
-  label_scheme = "lbrut_no2"
+  image_export = TRUE,
+  label_scheme = "lbrut_no2",
+  title_prefix = "LB Richmond upon Thames NO2 diffusion tubes,"
+)
+
+map_to_display
+
+map_to_display <- create_pollution_map(
+  oa_data_file = "breathe_london_imperial_annualised_2021_2025_to_250422.Rdata",
+  boroughs = c("Richmond"),
+  output_file = "richmond_bl_pm25_map_asr.html",
+  image_export = FALSE,
+  label_scheme = "gla_pm25",
+  title_prefix = "LB Richmond upon Thames Breathe London PM2.5,",
+  legend_title = "Annual PM2.5, ug/m3"
 )
 
 map_to_display
