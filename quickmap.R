@@ -1,10 +1,25 @@
-# Working alpha codebase for quickmap ####
-# Version 0.5
-# Objectives:
-#   done: modify to use create and data in OpenAir format (eg wide rather than long)
-#   done: make into a set of standalone functions to be integrated with OAPL library
-#   done: replace redundant code with functions (e.g. use assign_colour in later map
-#         layers, and add scope to keep labels in a vector)
+# Working, stable alpha codebase for quickmap ####
+# To do in next stable version
+#   Efficiency, compactness, robustnes, appearances
+#     keep rectanlges size invariant or replace with coloured icon
+#     by rebuilding the layer creation logic with a single data interface
+#     but options for the creation of the layer.
+#     Separate the JPG and HTML generation steps or merge into layer creation
+#     . Modularise and reuse the  mapping code for both HTML map generation
+#       and statis impage export
+#     . Modularise and resuse the symbol generation and colour assingment code
+#.  Improve code efficiency
+#     Separate the data loading tasks (should really only be done once at least
+#     for the huge BL dataset) and the mapping tasks.
+#.  Treat data loading type independently from data transformation to make it
+#     input data type independent
+#   Manage data loading and map creation separately
+#     Allow subsetting by year for static or dynamic maps
+#     Potential future solution
+#     - Load datasets
+#     - Subselect to the desired data (years, locations, pollutants/layers, data sources)
+#     - Generate desired layers and output types (HTML or static images)
+
 # History
 #   Original scripts:
 #     imports NO2 and schools data from CSV file into a simple format table
@@ -28,26 +43,15 @@
 #   squares, and optional Labels in the CSV/DT input file. Code now needs a good
 #   bit of simplification as there's a lot that could be reused.
 #   250522: v0.5 added a selector for which years to plot
-# To do
-#.  Appearances
-#     Add colour scale for PM2.5, labels for Wandsworth & Merton NO2 (done)
-#     Correct title loction to not go off the top
-#     Move controls to one place on the map.
-#.  Improve code efficiency
-#     . Separate the data loading tasks (should really only be done once at least
-#     for the huge BL dataset) and the mapping tasks.
-#.    . Treat data loading type independently from data transformation to make it
-#     input dat type independent
-#     Separate the JPG and HTML generation steps
-#     . create a flag control for which field to plot (no2, pm25, schools)
-#     . Modularise and reuse the  mapping code for both HTML map generation
-#       and statis impage export
-#     . Modularise and resuse the symbol generation and colour assingment code
-#     Allow subsetting by year for static or dynamic maps
-#     Potential future solution
-#     - Load datasets
-#     - Subselect to the desired data (years, locations, pollutants/layers, data sources)
-#     - Generate desired layers and output types (HTML or static images)
+# Version 0.6.1
+#   done: removed white circles for sites represented by NAs
+# Version 0.6
+# Objectives:
+#   done: modify to use create and data in OpenAir format (eg wide rather than long)
+#   done: make into a set of standalone functions to be integrated with OAPL library
+#   done: replace redundant code with functions (e.g. use assign_colour in later map
+#         layers, and add scope to keep labels in a vector)
+#     . (done) create a flag control for which field to plot (no2, pm25, schools)
 
 # Install and load required packages
 packages <- c("leaflet", "sf", "dplyr", "leaflegend", "webshot2", "htmlwidgets")
@@ -64,34 +68,6 @@ lapply(packages, library, character.only = TRUE)
 # function definitions ####
 
 # import and prepares the data from csv files in wide format ####
-# import_csv_data <- function(file_path, required_cols = c("Easting", "Northing")) {
-#   # Read the CSV file
-#   data <- read.csv(file_path, stringsAsFactors = FALSE,
-#                    check.names = FALSE, na.strings = c("", "NA", "NaN"))
-#
-#   # Clean the data frame column names to remove the X prefix if present
-#   names(data) <- gsub("^X", "", names(data))
-#
-#   # Check if the required columns are present after cleaning
-#   if (!all(required_cols %in% names(data))) {
-#     stop(paste("Missing required columns:", paste(setdiff(required_cols, names(data)), collapse = ", ")))
-#   }
-#
-#   # Filter out rows with NA in any of the required columns
-#   data <- data[complete.cases(data[, required_cols]), ]
-#
-#   # Identify value columns (excluding coordinate columns)
-#   value_columns <- names(data)[!names(data) %in% c("Easting", "Northing")]
-#
-#   # Ensure that there is at least one value column
-#   if (length(value_columns) == 0) {
-#     stop("No value columns found in data")
-#   }
-#
-#   # Return a list containing the cleaned data and the value columns
-#   return(list(data = data, value_columns = value_columns))
-# }
-
 import_csv_data <- function(
   file_path,
   required_cols = c("Easting", "Northing")
@@ -487,7 +463,8 @@ create_pollution_map <- function(
   years_to_plot = NULL,
   map_width_px = 1200,
   use_data_labels = FALSE,
-  pollutant = "no2"
+  pollutant = "no2",
+  map_title = "Air pollution map"
 ) {
   # data loading section
 
@@ -521,6 +498,8 @@ create_pollution_map <- function(
 
     sf_data_wgs84 <- transform_to_wgs84(data_long)
   }
+  # create directory to hold the output files
+  if (!dir.exists("aq_maps")) dir.create("aq_maps", showWarnings = TRUE)
 
   # then the location of the schools
   if (school_file != "none") {
@@ -532,7 +511,7 @@ create_pollution_map <- function(
           required_cols = c("Easting", "Northing")
         )
 
-        # Step 2: Transform to WGS84
+        # Step 2: Transform to WGS84 (e.g. lat-lon coordinates)
         sf_schools_wgs84 <- school_import$data |>
           transform_to_wgs84()
 
@@ -641,7 +620,7 @@ create_pollution_map <- function(
 
       # partially vectorised creation of overlaid Breathe London site data
       if (nrow(oa_subset) > 0) {
-        dx <- 0.001
+        dx <- 0.00025
         dy <- dx * cos(oa_subset$Latitude * pi / 180)
         rects <- mapply(
           function(lon, lat, x, y) {
@@ -702,7 +681,12 @@ create_pollution_map <- function(
 
     # if required add the Diffusion Tube data as the next layer to the HTML
     if (csv_data_file != "none") {
-      subset_data <- sf_data_wgs84[sf_data_wgs84$year_str == yr, ]
+      #subset_data <- sf_data_wgs84[sf_data_wgs84$year_str == yr, ]
+      subset_data <- dplyr::filter(
+        sf_data_wgs84,
+        year_str == yr,
+        !is.na(.data[[pollutant]])
+      )
 
       # Create DT labels using "Label" column or not
       labels <- if (use_data_labels) {
@@ -711,7 +695,7 @@ create_pollution_map <- function(
         value_str <- ifelse(
           is.na(subset_data[[pollutant]]),
           "",
-          paste(subset_data[[pollutant]], "ug/m3")
+          paste(as.integer(subset_data[[pollutant]]), "ug/m3")
         )
         value_str
       }
@@ -743,38 +727,11 @@ create_pollution_map <- function(
           )
         )
     }
-
-    # old method of addding the title that creates one per layer
-    # could be retained to show an on layer year marker only
-    # map <- map %>%
-    #   addLabelOnlyMarkers(
-    #     data = data.frame(
-    #       Longitude = (bbox["xmin"] + bbox["xmax"]) / 2,
-    #       Latitude = bbox["ymax"] - 0.025 * (bbox["ymax"] - bbox["ymin"])
-    #     ),
-    #     lng = ~Longitude,
-    #     lat = ~Latitude,
-    #     group = yr,
-    #     # use HTML to allow for styling, especially new lines
-    #     label = htmltools::HTML(paste0(title_prefix, " ", yr)),
-    #     labelOptions = labelOptions(
-    #       noHide = TRUE,
-    #       direction = "top",
-    #       textOnly = TRUE,
-    #       style = list(
-    #         "font-family" = "Arial, sans-serif",
-    #         "font-weight" = "bold",
-    #         "font-size" = "18px",
-    #         "background-color" = "rgba(255,255,255,0.8)",
-    #         "padding" = "2px",
-    #         "text-align" = "center"
-    #       )
-    #     )
-    #   )
   }
 
   # add borough and wards boundaries, vignette overlay, legend, and
   # a control for which dynamic map layer is displayed
+  # to the HTML files
   map <- map %>%
     # wards and the borough boundary
     addPolygons(
@@ -818,7 +775,8 @@ create_pollution_map <- function(
       baseGroups = years_to_plot,
       options = layersControlOptions(collapsed = FALSE, position = 'topleft')
     ) |>
-    # new method of adding the title as a Leaflet Control, which gives better control over the object
+    # new method of adding the title as a Leaflet Control, which gives better
+    # control over the object
     addControl(
       html = htmltools::HTML(
         sprintf(
@@ -864,7 +822,13 @@ create_pollution_map <- function(
 
   tryCatch(
     {
-      htmlwidgets::saveWidget(map, file = output_file)
+      html_file <- file.path("aq_maps", paste0(output_file))
+      htmlwidgets::saveWidget(
+        map,
+        file = html_file,
+        selfcontained = TRUE,
+        title = map_title
+      )
     },
     error = function(e) {
       warning("Could not save map to file: ", e$message)
@@ -875,7 +839,6 @@ create_pollution_map <- function(
   # this is currently setup to only display the Diffusion Tube data
   # but could be extended to include the Breathe London datasets
   if (isTRUE(image_export)) {
-    dir.create("map_images", showWarnings = FALSE)
     for (yr in years_to_plot) {
       subset_data <- sf_data_wgs84[sf_data_wgs84$year_str == yr, ]
       # Create labels based on presence of "Label" column
@@ -885,15 +848,15 @@ create_pollution_map <- function(
         value_str <- ifelse(
           is.na(subset_data[[pollutant]]),
           "",
-          paste(subset_data[[pollutant]], "ug/m3")
+          paste(as.integer(subset_data[[pollutant]]), "ug/m3")
         )
         value_str
       }
-      # Add jitter to coordinates for labels
+      # Add offset to coordinates for labels
       coords <- subset_data %>%
         mutate(
-          lbl_lon = Longitude + rnorm(n(), sd = 0.0001), # jitter longitude
-          lbl_lat = Latitude + rnorm(n(), sd = 0.0001) # jitter latitude
+          lbl_lon = Longitude + 0.0001, # jitter longitude
+          lbl_lat = Latitude + 0.0001 # jitter latitude
         )
       yearly_map <- leaflet(
         subset_data,
@@ -941,14 +904,12 @@ create_pollution_map <- function(
           html = htmltools::HTML(
             paste0(
               '<div style="
-        font-weight: bold;
-        font-size: 24px;
         background-color: rgba(255,255,255,0.8);
-        padding: 8px 16px;
-        border-radius: 4px;
+        padding: 2px 2px;
+        border-radius: 3px;
         text-align: center;
-        margin-top: 20px;
-        width: 60vw;
+        margin-top: 4px;
+        width: 95vw;
         margin-left: auto;
         margin-right: auto;
       ">',
@@ -960,33 +921,6 @@ create_pollution_map <- function(
           ),
           position = "topright" # or "topleft"
         ) |>
-        # addLabelOnlyMarkers(
-        #   data = data.frame(
-        #     Longitude = bbox["xmin"] +
-        #       0.025 *
-        #         (bbox["xmax"] - bbox["xmin"]) /
-        #         cos(pi * bbox["ymax"] / 180),
-        #     Latitude = bbox["ymax"] -
-        #       0.025 * (bbox["ymax"] - bbox["ymin"])
-        #   ),
-        #   lng = ~Longitude,
-        #   lat = ~Latitude,
-        #   # use HTML to allow for styling, especially new lines
-        #   label = htmltools::HTML(paste0(title_prefix, " ", yr)),
-        #   labelOptions = labelOptions(
-        #     noHide = TRUE,
-        #     direction = "top", # adaptive placement
-        #     textOnly = TRUE,
-        #     style = list(
-        #       "font-weight" = "bold",
-        #       "font-size" = "24px",
-        #       "background-color" = "rgba(255,255,255,0.8)",
-        #       "padding" = "4px",
-        #       "white-space" = "nowrap",
-        #       "text-align" = "left"
-        #     )
-        #   )
-        # ) %>%
         addPolygons(
           data = borough_sf,
           color = "#078141",
@@ -1031,10 +965,15 @@ create_pollution_map <- function(
       file_parts <- tools::file_path_sans_ext(basename(output_file))
       file_ext <- tools::file_ext(output_file)
 
-      html_file <- file.path("map_images", paste0(file_parts, "_", yr, ".html"))
-      img_file <- file.path("map_images", paste0(file_parts, "_", yr, ".jpg"))
+      html_file <- file.path("aq_maps", paste0(file_parts, "_", yr, ".html"))
+      img_file <- file.path("aq_maps", paste0(file_parts, "_", yr, ".jpg"))
 
-      saveWidget(yearly_map, file = html_file, selfcontained = TRUE)
+      saveWidget(
+        yearly_map,
+        file = html_file,
+        selfcontained = TRUE,
+        title = map_title
+      )
       webshot2::webshot(
         url = html_file,
         file = img_file,
